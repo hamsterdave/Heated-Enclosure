@@ -27,11 +27,12 @@
 ///////TEMPERATURE LIMITS////////
 #define cabinetMin 30                 //Minimum temp at which heater will operate, setTemp < this = heater off
 #define cabinetLimit 80               //Max user selectable cabinet temp
-#define heaterLimit 150               //Upper heater limit for bang-bang heating
-#define cabinetRunAway 85              //Cabinet temp that triggers runaway state
-#define heaterRunAway 200             //Heater temp that triggers runaway
+#define heaterLimit 170               //Upper heater limit for bang-bang heating
+//#define cabinetRunAway 85              //Cabinet temp that triggers runaway state
+#define heaterRunAway 210             //Heater temp that triggers runaway
+#define heaterMin 140
 ///////Timer Constants///////
-#define heatTimeOut 1800              //Number of cycles before heating success must be reported to avoid runaway condition
+#define heatTimeOut 3600              //Number of cycles before heating success must be reported to avoid runaway condition
 #define timerDuration 1000            //mS, time between "cycle" variables increment
 
 volatile bool encChange = false;      //Encoder has had input
@@ -43,16 +44,18 @@ volatile bool heatSuccess = false;    //Did cabinet reach target temp?
 volatile bool buttonFlag = false;    //Button was pushed if true
 bool ssrState = false;                //Is heater on or off?
 bool runAwayFlag = false;             //Has runaway condition been detected?
-double cabinetTemp = 0;               // Cabinet temp
-double heaterTemp = 0;                //Heater temp
-double heaterTempStart = 0;           //Record previous heater temp measurement for runaway detection
-double heaterTempChange = 0;          //Calculated heater temp change from power on
-double tempDif = 0;                   //Difference between set and cabinet temperature
+float cabinetTemp = 0;               // Cabinet temp
+float heaterTemp = 0;                //Heater temp
+float heaterTempOld = 0;
+float heaterTempStart = 0;           //Record previous heater temp measurement for runaway detection
+float heaterTempChange = 0;          //Calculated heater temp change from power on
+float tempDif = 0;                   //Difference between set and cabinet temperature
 volatile unsigned long heaterOnCycles = 0;    //How long since cabinet heater was enabled in ticks
 int heatCycle = 0;                    //Number of ticks since power applied to heater element
 int coolCycle = 0;                    //Number of ticks since power removed from heater element for "coast" phase
-int heaterMin = 0;                    //Heater temp below which "coast" ends
+int cabinetRunaway = 70;
 volatile int setTemp = 0;             //Desired cabinet temperature
+int setTempOld = 0;
 
 LiquidCrystal_I2C lcd(0x27, 20, 4); // I2C address 0x27, 16 column and 2 rows
 
@@ -82,11 +85,13 @@ void encCount() {      //Determines direction of encoder and decrements
     if (newCount < 0) {
       newCount = cabinetLimit;
       encoder->setPosition(newCount);    
-    }    
+    }
+    
     if (newCount > cabinetLimit) {
       newCount = 0;
       encoder->setPosition(newCount);
     }
+    
     count = newCount;
     lcd.setCursor(10, 3);   //print only the "count" variable
     lcd.print(count);
@@ -115,6 +120,7 @@ void readTemp() {
   if (heaterTemp > 100) {
     lcd.print("C");
   }
+  
   if (heaterTemp < 100) {
     lcd.print("C ");
   }
@@ -150,7 +156,6 @@ void dispSetup() {      //Preprint titles and variables. After setup, only varia
   lcd.print("C");
 }
 
-
 ///HEATER OPERATION///
 void heat() {
   if (ssrState == false && setTemp > cabinetMin) {          //If the solid state relay is off
@@ -179,16 +184,16 @@ void heat() {
 
 void fan() {
   if (setTemp > cabinetMin) {
-    if (digitalRead(status) == false) {
+    if (digitalRead(status) == true) {
       digitalWrite(fan0, HIGH);
       digitalWrite(fan1, HIGH);
     }
-    else if (digitalRead(status) == true) {
-      if (heatSuccess == true) {
+    else if (digitalRead(status) == false) {
+      if (heatSuccess == false) {
         digitalWrite(fan0, HIGH);
         digitalWrite(fan1, LOW);
       }
-      else if (heatSuccess == false) {
+      else if (heatSuccess == true) {
         digitalWrite(fan0, LOW);
         digitalWrite(fan1, HIGH);
       }
@@ -196,13 +201,15 @@ void fan() {
   }
   else {
     digitalWrite(fan0, LOW);
-    digitalWrite(fan1, LOW);
+    digitalWrite(fan0, LOW);
 
   }
 }
 
 ///RUNAWAY AND FAULT DETECTION ROUTINES///
 void runAway() {    
+    heaterTemp = thermistorPTC->readCelsius();
+
   if (heaterTemp > heaterRunAway) {     //HEATER EXCEEDED SAFETY CUTOFF TEMP
     digitalWrite(ssr, LOW);
     runAwayFlag = true;
@@ -217,7 +224,7 @@ void runAway() {
     lcd.print("HEATER OVER TEMP");
   }
 
-  else if(cabinetTemp > cabinetRunAway) {   //CABINET EXCEEDED SAFETY CUTOFF TEMP
+  else if(cabinetTemp > cabinetRunaway) {   //CABINET EXCEEDED SAFETY CUTOFF TEMP
     digitalWrite(ssr, LOW);
     runAwayFlag = true;
     delay(100);
@@ -253,9 +260,11 @@ void runAway() {
     }
   }
 
-  else if(coolCycle == 20) {      //HEATER DID NOT COOL WHEN SSR SWITCHED OFF
-    heaterTemp = thermistorPTC->readCelsius();
+  else if(coolCycle == 30) {      //HEATER DID NOT COOL WHEN SSR SWITCHED OFF
+    /* heaterTemp = thermistorPTC->readCelsius();
+
     heaterTempChange = heaterTemp - heaterTempStart;
+ 
     if (heaterTempChange > 0) {
       digitalWrite(ssr, LOW);
       runAwayFlag = true;
@@ -273,6 +282,8 @@ void runAway() {
       coolCycle = 0;
       heaterTempStart = heaterTemp;
     }
+    */
+    coolCycle = 0;
   }
   else if (heaterOnCycles > heatTimeOut && heatSuccess == false) {    //CABINET FAILED TO REACH TARGET BEFORE TIMEOUT
       digitalWrite(ssr, LOW);
@@ -287,15 +298,11 @@ void runAway() {
       lcd.setCursor(0,2);
       lcd.print("CABINET HEAT TIMEOUT");
   }
-
-
 }
-
 
 void setup() {
   lcd.init(); // initialize the lcd
   lcd.backlight();
-
 
   timer.every(timerDuration, clockTick); //Start the timer. timerDuration is in milliseconds
   
@@ -316,6 +323,8 @@ void setup() {
   digitalWrite(emergency, HIGH); 
   pinMode(ssr, OUTPUT);
   digitalWrite(ssr, LOW);
+
+  pinMode(status, INPUT_PULLUP);
 
   thermistorCab = new SmoothThermistor(   //Define thermistor parameters
     new NTC_Thermistor(
@@ -349,9 +358,26 @@ void loop() {
     runAway();
 
     if (buttonFlag == true) {   //If button pressed, load encoder count to setTemp, reset heatSuccess flag and timer, update LCD
+      setTempOld = setTemp;
       setTemp = count;
+
+      if (setTempOld < setTemp) {
+        cabinetRunaway = setTempOld + 10;
+      }
+      else {
+      cabinetRunaway = setTemp + 10;
+      }
+      
+      if (cabinetRunaway > 80) {
+        cabinetRunaway = 80;
+      }      
+      else if (cabinetRunaway < 35) {
+        cabinetRunaway = 35;
+      }
+        
       heatSuccess = false;
       heaterOnCycles = 0;
+
       lcd.setCursor(10, 2);
       if (setTemp > cabinetMin) {
         lcd.print(setTemp);
@@ -368,7 +394,7 @@ void loop() {
       fan();
       tempDif = setTemp - cabinetTemp;  //Calculates temp difference between desired and actual cabinet temp
       if (heatSuccess == false && setTemp > cabinetMin) {                 //If cabinet hasn't reached set temp yet
-        if (tempDif <= 2 && tempDif >= -2) {      // Tolerable cabinet temp range, +/- 2 degrees for successful heating
+        if (tempDif <= 1 && tempDif >= -1) {      // Tolerable cabinet temp range, +/- 2 degrees for successful heating
           heatSuccess = true;
           heaterOnCycles = 0;
         }
@@ -379,30 +405,32 @@ void loop() {
           heatSuccess = false;
           heaterOnCycles = heatTimeOut / 2;
         }
-        else if (tempDif > 2 || tempDif < -2){
+        else if (tempDif > 1 || tempDif < -1){
           heatSuccess = false;
           heaterOnCycles = 0;
         }
+        else if (tempDif <= 1 && tempDif >= -1) {
+          heaterOnCycles = 0;
+        }
       }
-        
+      
       if (setTemp > cabinetMin) {   //setTemp must be > cabinetMin, or cabinet is OFF
         heaterOnCycles++;           //Tracks timer ticks from set temperature change for runaway
-        heaterMin = setTemp + tempDif;  //bottom of heater coast phase, goes up with larger temperature difference between set and cabinet temp
+        //heaterMin = setTemp + tempDif;  //bottom of heater coast phase, goes up with larger temperature difference between set and cabinet temp
         heat();
       }
+      
       if (setTemp < cabinetMin) {   //Checks for cabinet disabled by user
         heaterOnCycles = 0;
         heatSuccess = false;
         heat();
       }
       clockFlag = false;
-
     }
-
+    
     if (encChange == true) {
       encCount(); 
     }
   }
-
 
 }
